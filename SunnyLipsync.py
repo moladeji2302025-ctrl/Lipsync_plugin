@@ -9,8 +9,9 @@ Installation
 Required Python packages (install into Maya Python)
 ----------------------------------------------------
 ``mayapy -m pip install openai-whisper pronouncing vosk``
-If using Vosk fallback, download a small English model (for example
-``vosk-model-small-en-us-0.15``) into ``~/.cache/vosk/``.
+If using Vosk fallback, download the latest small English model from the
+Vosk model repository into ``~/.cache/vosk/`` (default lookup prefers
+``vosk-model-small-en-us-0.15`` when present).
 
 Usage examples
 --------------
@@ -40,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import math
+import os
 import re
 import traceback
 import wave
@@ -292,10 +294,18 @@ ARPABET_TO_VISEME: dict[str, str] = {
 }
 
 MIN_PHONEME_DURATION = 1e-3
+# One-frame look-behind for anticipatory mouth motion at segment boundaries.
 ANTICIPATION_FRAME_OFFSET = 1
+# One-frame insertion for explicit REST transition when phonemes are non-adjacent.
 REST_INSERT_FRAME_OFFSET = 1
+# Release blend toward REST to soften exits (60% target, 40% rest).
 RELEASE_TARGET_WEIGHT = 0.6
 RELEASE_REST_WEIGHT = 0.4
+DEFAULT_VOSK_MODEL_NAME = "vosk-model-small-en-us-0.15"
+UI_START_FRAME_MIN = -100000
+UI_START_FRAME_MAX = 100000
+ICON_BORDER_COLOR = "#10243a"
+ICON_FILL_COLOR = "#2aa4ff"
 
 
 @dataclass(frozen=True)
@@ -357,10 +367,11 @@ class PhonemeDetector:
         except Exception:
             return None
 
-        model_path = Path.home() / ".cache" / "vosk" / "vosk-model-small-en-us-0.15"
-        if not model_path.exists():
+        model_path = self._resolve_vosk_model_path()
+        if model_path is None:
             raise MayaPluginError(
-                f"Vosk is installed but no model found at {model_path}. Download a small English model and place it there."
+                "Vosk is installed but no model was found. Set SUNNY_LIPSYNC_VOSK_MODEL "
+                "to a model folder, or place a small English model in ~/.cache/vosk/."
             )
 
         audio_file = Path(self.audio_path)
@@ -387,6 +398,25 @@ class PhonemeDetector:
             return words
         except Exception as exc:
             raise MayaPluginError(f"Vosk failed: {exc}") from exc
+
+    def _resolve_vosk_model_path(self) -> Path | None:
+        """Resolve Vosk model path from env var, default folder, or any cached model."""
+        env_model = os.environ.get("SUNNY_LIPSYNC_VOSK_MODEL", "").strip()
+        if env_model:
+            candidate = Path(env_model).expanduser()
+            if candidate.exists():
+                return candidate
+
+        cache_root = Path.home() / ".cache" / "vosk"
+        preferred = cache_root / DEFAULT_VOSK_MODEL_NAME
+        if preferred.exists():
+            return preferred
+
+        if cache_root.exists():
+            for folder in sorted(cache_root.iterdir()):
+                if folder.is_dir() and folder.name.startswith("vosk-model"):
+                    return folder
+        return None
 
     def _word_to_visemes(self, start: float, end: float, word: str) -> list[PhonemeSegment]:
         try:
@@ -618,7 +648,7 @@ if MAYA_AVAILABLE:
         """Dependency node carrying Sunny lipsync configuration attributes."""
 
         kNodeName = "SunnyLipsyncNode"
-        # Reserved custom node type ID for SunnyLipsync in this plugin package.
+        # User-defined node type ID reserved for SunnyLipsync in local pipeline range.
         kNodeId = om.MTypeId(0x00127850)
 
         audioFilePath = om.MObject()
@@ -644,7 +674,10 @@ if MAYA_AVAILABLE:
                 out_handle.setString(status)
                 data_block.setClean(plug)
             except Exception as exc:
-                raise RuntimeError(f"SunnyLipsyncNode compute failed: {exc}")
+                raise RuntimeError(
+                    f"SunnyLipsyncNode compute failed for plug '{plug.partialName()}': {exc}. "
+                    "Check node connections and attribute values."
+                )
 
         @staticmethod
         def creator() -> om.MPxNode:
@@ -840,7 +873,7 @@ class SunnyLipsyncDock(MayaQWidgetDockableMixin, QtWidgets.QWidget):
 
         self.namespace = QtWidgets.QLineEdit()
         self.start_frame = QtWidgets.QSpinBox()
-        self.start_frame.setRange(-100000, 100000)
+        self.start_frame.setRange(UI_START_FRAME_MIN, UI_START_FRAME_MAX)
         self.start_frame.setValue(1)
 
         self.fps_combo = QtWidgets.QComboBox()
@@ -945,8 +978,8 @@ def _create_default_icon(icon_path: Path) -> None:
     pixmap.fill(QtCore.Qt.transparent)
     painter = QtGui.QPainter(pixmap)
     painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-    painter.setPen(QtGui.QPen(QtGui.QColor("#10243a"), 3))
-    painter.setBrush(QtGui.QColor("#2aa4ff"))
+    painter.setPen(QtGui.QPen(QtGui.QColor(ICON_BORDER_COLOR), 3))
+    painter.setBrush(QtGui.QColor(ICON_FILL_COLOR))
     painter.drawRoundedRect(QtCore.QRectF(8, 10, 48, 36), 10, 10)
     triangle = QtGui.QPolygonF(
         [QtCore.QPointF(24, 44), QtCore.QPointF(30, 56), QtCore.QPointF(36, 44)]
