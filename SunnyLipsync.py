@@ -291,6 +291,12 @@ ARPABET_TO_VISEME: dict[str, str] = {
     "NG": "NN",
 }
 
+MIN_PHONEME_DURATION = 1e-3
+ANTICIPATION_FRAME_OFFSET = 1
+REST_INSERT_FRAME_OFFSET = 1
+RELEASE_TARGET_WEIGHT = 0.6
+RELEASE_REST_WEIGHT = 0.4
+
 
 @dataclass(frozen=True)
 class PhonemeSegment:
@@ -389,7 +395,7 @@ class PhonemeDetector:
             raise MayaPluginError("pronouncing package is required for ARPABET mapping.") from exc
 
         cleaned = re.sub(r"[^A-Za-z']", "", word).lower()
-        duration = max(end - start, 1e-3)
+        duration = max(end - start, MIN_PHONEME_DURATION)
         if not cleaned:
             return [PhonemeSegment(start, end, "REST")]
 
@@ -445,17 +451,17 @@ class LipsyncAnimWriter:
             return
 
         sorted_timeline = sorted(phoneme_timeline, key=lambda item: item[0])
-        start = self.to_frame(sorted_timeline[0][0])
-        end = self.to_frame(sorted_timeline[-1][1])
+        start_frame_range = self.to_frame(sorted_timeline[0][0])
+        end_frame_range = self.to_frame(sorted_timeline[-1][1])
 
         cmds.undoInfo(openChunk=True, chunkName="SunnyLipsyncWrite")
         try:
-            self.clear_keys(start, end)
+            self.clear_keys(start_frame_range, end_frame_range)
             for index, (seg_start, seg_end, viseme) in enumerate(sorted_timeline):
                 start_frame = self.to_frame(seg_start)
                 end_frame = max(start_frame, self.to_frame(seg_end))
                 peak_frame = int((start_frame + end_frame) * 0.5)
-                anticipation_frame = max(self.start_frame, start_frame - 1)
+                anticipation_frame = max(self.start_frame, start_frame - ANTICIPATION_FRAME_OFFSET)
 
                 self._key_pose(viseme, anticipation_frame, self.overshoot, "fast")
                 self._key_pose(viseme, peak_frame, 1.0, "flat")
@@ -464,9 +470,9 @@ class LipsyncAnimWriter:
                 if index + 1 < len(sorted_timeline):
                     next_start = self.to_frame(sorted_timeline[index + 1][0])
                     if next_start - end_frame > 1:
-                        self._key_pose("REST", end_frame + 1, 1.0, "auto")
+                        self._key_pose("REST", end_frame + REST_INSERT_FRAME_OFFSET, 1.0, "auto")
 
-            self._smooth_keys(start, end)
+            self._smooth_keys(start_frame_range, end_frame_range)
         except Exception as exc:
             raise MayaPluginError(f"Failed writing keyframes: {exc}") from exc
         finally:
@@ -537,7 +543,7 @@ class LipsyncAnimWriter:
                 continue
             for attr, target_value in attrs.items():
                 rest_value = rest_pose.get(control, {}).get(attr, 0.0)
-                release_value = (target_value * 0.6) + (rest_value * 0.4)
+                release_value = (target_value * RELEASE_TARGET_WEIGHT) + (rest_value * RELEASE_REST_WEIGHT)
                 plug = f"{node}.{attr}"
                 if not cmds.objExists(plug):
                     cmds.warning(f"SunnyLipsync: missing attribute '{plug}', skipping.")
@@ -660,9 +666,9 @@ if MAYA_AVAILABLE:
             SunnyLipsyncNode.blendOvershoot = num_attr.create("blendOvershoot", "bo", om.MFnNumericData.kFloat, 1.05)
             SunnyLipsyncNode.jawScaleBias = num_attr.create("jawScaleBias", "jb", om.MFnNumericData.kFloat, 1.0)
             SunnyLipsyncNode.expressionIntensity = num_attr.create("expressionIntensity", "ei", om.MFnNumericData.kFloat, 1.0)
-            # Intentional: only expressionIntensity is clamped to [0, 2].
-            num_attr.setMin(0.0)
-            num_attr.setMax(2.0)
+            expr_attr = om.MFnNumericAttribute(SunnyLipsyncNode.expressionIntensity)
+            expr_attr.setMin(0.0)
+            expr_attr.setMax(2.0)
 
             SunnyLipsyncNode.outputStatus = typed_attr.create("outputStatus", "os", om.MFnData.kString, string_data)
             typed_attr.writable = False
