@@ -9,6 +9,8 @@ Installation
 Required Python packages (install into Maya Python)
 ----------------------------------------------------
 ``mayapy -m pip install openai-whisper pronouncing vosk``
+If using Vosk fallback, download a small English model (for example
+``vosk-model-small-en-us-0.15``) into ``~/.cache/vosk/``.
 
 Usage examples
 --------------
@@ -443,15 +445,15 @@ class LipsyncAnimWriter:
             return
 
         sorted_timeline = sorted(phoneme_timeline, key=lambda item: item[0])
-        start = self._to_frame(sorted_timeline[0][0])
-        end = self._to_frame(sorted_timeline[-1][1])
+        start = self.to_frame(sorted_timeline[0][0])
+        end = self.to_frame(sorted_timeline[-1][1])
 
         cmds.undoInfo(openChunk=True, chunkName="SunnyLipsyncWrite")
         try:
             self.clear_keys(start, end)
             for index, (seg_start, seg_end, viseme) in enumerate(sorted_timeline):
-                start_frame = self._to_frame(seg_start)
-                end_frame = max(start_frame, self._to_frame(seg_end))
+                start_frame = self.to_frame(seg_start)
+                end_frame = max(start_frame, self.to_frame(seg_end))
                 peak_frame = int((start_frame + end_frame) * 0.5)
                 anticipation_frame = max(self.start_frame, start_frame - 1)
 
@@ -460,7 +462,7 @@ class LipsyncAnimWriter:
                 self._key_release(viseme, end_frame, "slow")
 
                 if index + 1 < len(sorted_timeline):
-                    next_start = self._to_frame(sorted_timeline[index + 1][0])
+                    next_start = self.to_frame(sorted_timeline[index + 1][0])
                     if next_start - end_frame > 1:
                         self._key_pose("REST", end_frame + 1, 1.0, "auto")
 
@@ -492,7 +494,8 @@ class LipsyncAnimWriter:
         max_time = int(cmds.playbackOptions(q=True, maxTime=True))
         self.clear_keys(min_time, max_time)
 
-    def _to_frame(self, time_seconds: float) -> int:
+    def to_frame(self, time_seconds: float) -> int:
+        """Convert seconds on the audio timeline to scene frame number."""
         return int(round(self.start_frame + (time_seconds * self.fps)))
 
     def _node_name(self, control: str) -> str:
@@ -609,6 +612,7 @@ if MAYA_AVAILABLE:
         """Dependency node carrying Sunny lipsync configuration attributes."""
 
         kNodeName = "SunnyLipsyncNode"
+        # Reserved custom node type ID for SunnyLipsync in this plugin package.
         kNodeId = om.MTypeId(0x00127850)
 
         audioFilePath = om.MObject()
@@ -656,6 +660,7 @@ if MAYA_AVAILABLE:
             SunnyLipsyncNode.blendOvershoot = num_attr.create("blendOvershoot", "bo", om.MFnNumericData.kFloat, 1.05)
             SunnyLipsyncNode.jawScaleBias = num_attr.create("jawScaleBias", "jb", om.MFnNumericData.kFloat, 1.0)
             SunnyLipsyncNode.expressionIntensity = num_attr.create("expressionIntensity", "ei", om.MFnNumericData.kFloat, 1.0)
+            # Intentional: only expressionIntensity is clamped to [0, 2].
             num_attr.setMin(0.0)
             num_attr.setMax(2.0)
 
@@ -767,8 +772,8 @@ if MAYA_AVAILABLE:
                 writer.write(timeline)
                 self._did_change_scene = True
 
-                frame_start = writer._to_frame(timeline[0][0])
-                frame_end = writer._to_frame(timeline[-1][1])
+                frame_start = writer.to_frame(timeline[0][0])
+                frame_end = writer.to_frame(timeline[-1][1])
                 duration = max(0.0, timeline[-1][1] - timeline[0][0])
                 om.MGlobal.displayInfo(
                     f"SunnyLipsync wrote {len(timeline)} segments, frames {frame_start}-{frame_end}, duration {duration:.2f}s"
@@ -984,6 +989,7 @@ def initializePlugin(plugin_obj: Any) -> None:
     if not MAYA_AVAILABLE:
         raise RuntimeError("Cannot initialize plugin outside Maya.")
     plugin = om.MFnPlugin(plugin_obj, "SunnyLipsync", "1.0.0", "Any")
+    node_registered = False
     try:
         plugin.registerNode(
             SunnyLipsyncNode.kNodeName,
@@ -991,13 +997,15 @@ def initializePlugin(plugin_obj: Any) -> None:
             SunnyLipsyncNode.creator,
             SunnyLipsyncNode.initialize,
         )
+        node_registered = True
         plugin.registerCommand(
             SunnyLipsyncCommand.kCommandName,
             SunnyLipsyncCommand.creator,
             SunnyLipsyncCommand.create_syntax,
         )
     except Exception:
-        plugin.deregisterNode(SunnyLipsyncNode.kNodeId)
+        if node_registered:
+            plugin.deregisterNode(SunnyLipsyncNode.kNodeId)
         raise
 
 
